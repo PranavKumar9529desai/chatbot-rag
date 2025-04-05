@@ -1,0 +1,182 @@
+import { NextRequest, NextResponse } from "next/server";
+import { Message as VercelChatMessage, StreamingTextResponse } from "ai";
+
+import { createClient } from "@supabase/supabase-js";
+
+import { PromptTemplate } from "@langchain/core/prompts";
+import { SupabaseVectorStore } from "@langchain/community/vectorstores/supabase";
+import { Document } from "@langchain/core/documents";
+import { RunnableSequence } from "@langchain/core/runnables";
+import {
+  BytesOutputParser,
+  StringOutputParser,
+} from "@langchain/core/output_parsers";
+import { getChatModel, getEmbeddings } from "@/utils/modelSelection";
+
+export const runtime = "edge";
+
+const combineDocumentsFn = (docs: Document[]) => {
+  const serializedDocs = docs.map((doc) => doc.pageContent);
+  return serializedDocs.join("\n\n");
+};
+
+const formatVercelMessages = (chatHistory: VercelChatMessage[]) => {
+  const formattedDialogueTurns = chatHistory.map((message) => {
+    if (message.role === "user") {
+      return `Human: ${message.content}`;
+    } else if (message.role === "assistant") {
+      return `Assistant: ${message.content}`;
+    } else {
+      return `${message.role}: ${message.content}`;
+    }
+  });
+  return formattedDialogueTurns.join("\n");
+};
+
+const CONDENSE_QUESTION_TEMPLATE = `Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question, in its original language.
+
+Chat History:
+{chat_history}
+Follow Up Input: {question}
+Standalone question:`;
+const condenseQuestionPrompt = PromptTemplate.fromTemplate(
+  CONDENSE_QUESTION_TEMPLATE,
+);
+
+const ANSWER_TEMPLATE = `Answer the question based only on the following context:
+{context}
+
+Question: {question}
+`;
+const answerPrompt = PromptTemplate.fromTemplate(ANSWER_TEMPLATE);
+
+/**
+ * This handler initializes and calls a retrieval chain. It composes the chain using
+ * LangChain Expression Language. See the docs for more information:
+ *
+ * https://js.langchain.com/v0.2/docs/how_to/qa_chat_history_how_to/
+ */
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const messages = body.messages ?? [];
+    const previousMessages = messages.slice(0, -1);
+    const currentMessageContent = messages[messages.length - 1].content;
+
+    /**
+     * Use utility functions to get the model and embeddings.
+     */
+    const model = getChatModel(0.2, undefined);
+    const embeddings = getEmbeddings();
+
+    const client = createClient(
+      process.env.SUPABASE_URL!,
+      process.env.SUPABASE_PRIVATE_KEY!,
+    );
+    const vectorstore = new SupabaseVectorStore(embeddings, {
+      client,
+      tableName: "documents",
+      queryName: "match_documents",
+    });
+
+    /**
+     * We use LangChain Expression Language to compose two chains.
+     * To learn more, see the guide here:
+     *
+     * https://js.langchain.com/docs/guides/expression_language/cookbook
+     *
+     * You can also use the "createRetrievalChain" method with a
+     * "historyAwareRetriever" to get something prebaked.
+     */
+    const standaloneQuestionChain = RunnableSequence.from([
+      condenseQuestionPrompt,
+      model,
+      new StringOutputParser(),
+    ]);
+
+    // Log the standalone question
+    standaloneQuestionChain.invoke({
+      chat_history: formatVercelMessages(previousMessages),
+      question: currentMessageContent,
+    }).then(standaloneQuestion => {
+      console.log("Retrieval Route: Standalone question for retrieval:", standaloneQuestion);
+      
+      // Also log that this standalone question will be used for embeddings
+      console.log("Retrieval Route: This standalone question will be embedded for vector search");
+    });
+
+    let resolveWithDocuments: (value: Document[]) => void;
+    const documentPromise = new Promise<Document[]>((resolve) => {
+      resolveWithDocuments = resolve;
+    });
+
+    const retriever = vectorstore.asRetriever({
+      callbacks: [
+        {
+          handleRetrieverStart(retriever, documents, runId, parentRunId, tags, metadata) {
+            console.log("Retrieval Route: Retriever starting with query:", documents); // Log the query/input
+          },
+          handleRetrieverEnd(documents) {
+            // Log the retrieved documents
+            console.log(`Retrieval Route: Retrieved ${documents.length} documents.`);
+            // Log content snippets of retrieved docs for inspection
+            documents.forEach((doc, index) => {
+              console.log(`Retrieval Route: Doc ${index + 1} content snippet:`, doc.pageContent.substring(0, 100) + "...");
+            });
+            resolveWithDocuments(documents);
+          },
+        },
+      ],
+    });
+
+    const retrievalChain = retriever.pipe(combineDocumentsFn);
+
+    const answerChain = RunnableSequence.from([
+      {
+        context: RunnableSequence.from([
+          (input) => input.question,
+          retrievalChain,
+        ]),
+        chat_history: (input) => input.chat_history,
+        question: (input) => input.question,
+      },
+      answerPrompt,
+      model,
+    ]);
+
+    const conversationalRetrievalQAChain = RunnableSequence.from([
+      {
+        question: standaloneQuestionChain,
+        chat_history: (input) => input.chat_history,
+      },
+      answerChain,
+      new BytesOutputParser(),
+    ]);
+
+    const stream = await conversationalRetrievalQAChain.stream({
+      question: currentMessageContent,
+      chat_history: formatVercelMessages(previousMessages),
+    });
+
+    const documents = await documentPromise;
+    const serializedSources = Buffer.from(
+      JSON.stringify(
+        documents.map((doc) => {
+          return {
+            pageContent: doc.pageContent.slice(0, 50) + "...",
+            metadata: doc.metadata,
+          };
+        }),
+      ),
+    ).toString("base64");
+
+    return new StreamingTextResponse(stream, {
+      headers: {
+        "x-message-index": (previousMessages.length + 1).toString(),
+        "x-sources": serializedSources,
+      },
+    });
+  } catch (e: any) {
+    return NextResponse.json({ error: e.message }, { status: e.status ?? 500 });
+  }
+}
