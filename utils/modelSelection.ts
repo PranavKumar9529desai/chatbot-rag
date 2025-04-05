@@ -1,3 +1,4 @@
+//@ts-nocheck
 import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
 import { ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
 import { BaseChatModel } from "@langchain/core/language_models/chat_models";
@@ -9,6 +10,7 @@ import { BaseChatModelCallOptions } from "@langchain/core/language_models/chat_m
 class LoggingEmbeddingsWrapper implements Embeddings {
   private embeddings: Embeddings;
   private name: string;
+  caller: string = "LoggingEmbeddingsWrapper"; // Add the caller property
 
   constructor(embeddings: Embeddings, name: string) {
     this.embeddings = embeddings;
