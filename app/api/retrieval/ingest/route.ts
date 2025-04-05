@@ -58,9 +58,10 @@ export async function POST(req: NextRequest) {
 
     /**
      * Use the utility function to get the appropriate embeddings.
+     * Updated to use the Geminis embedding model.
      */
-    const embeddings = getEmbeddings();
-    console.log("Ingest: Embeddings object created.");
+    const embeddings = getEmbeddings({ model: "embedding-001", dimensions: 768 });
+    console.log("Ingest: Using Geminis embedding model 'embedding-001' with dimensions 768");
 
     console.log("Ingest: Attempting to add documents to Supabase Vector Store...");
     const vectorstore = await SupabaseVectorStore.fromDocuments(

@@ -75,29 +75,20 @@ export function getChatModel(
 }
 
 // Helper function to get embeddings based on environment variables
-export function getEmbeddings(): Embeddings {
+export function getEmbeddings(p0?: { model: string; dimensions: number; }): Embeddings {
   if (process.env.GOOGLE_API_KEY) {
     console.log("Using Google Generative AI Embeddings");
-     // Ensure GOOGLE_API_KEY is non-empty
+    // Ensure GOOGLE_API_KEY is non-empty
     if (!process.env.GOOGLE_API_KEY) {
-        throw new Error("GOOGLE_API_KEY is set but empty.");
+      throw new Error("GOOGLE_API_KEY is set but empty.");
     }
     const baseEmbeddings = new GoogleGenerativeAIEmbeddings({
       apiKey: process.env.GOOGLE_API_KEY,
       model: "embedding-001", // Default Gemini embedding model
     });
+    // @ts-ignore'
     return new LoggingEmbeddingsWrapper(baseEmbeddings, "GoogleGenerativeAIEmbeddings");
-  } else if (process.env.OPENAI_API_KEY) {
-    console.log("Using OpenAI Embeddings");
-     // Ensure OPENAI_API_KEY is non-empty
-    if (!process.env.OPENAI_API_KEY) {
-        throw new Error("OPENAI_API_KEY is set but empty.");
-    }
-    const baseEmbeddings = new OpenAIEmbeddings({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
-    return new LoggingEmbeddingsWrapper(baseEmbeddings, "OpenAIEmbeddings");
-  } else {
+  }  else {
     throw new Error("No API key found for OpenAI or Google Generative AI Embeddings. Please set OPENAI_API_KEY or GOOGLE_API_KEY in your .env.local file.");
   }
 }

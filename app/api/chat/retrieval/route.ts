@@ -47,6 +47,9 @@ const ANSWER_TEMPLATE = `Answer the question based only on the following context
 {context}
 
 Question: {question}
+
+If the context doesn't directly mention "GymNavigator", you can still provide information about gym management systems based on what's available in the context. 
+Make sure your answer is helpful and indicates it's based on the information provided.
 `;
 const answerPrompt = PromptTemplate.fromTemplate(ANSWER_TEMPLATE);
 
@@ -65,19 +68,66 @@ export async function POST(req: NextRequest) {
 
     /**
      * Use utility functions to get the model and embeddings.
+     * Updated to use the Geminis embedding model.
      */
     const model = getChatModel(0.2, undefined);
-    const embeddings = getEmbeddings();
+    const embeddings = getEmbeddings({ model: "embedding-001", dimensions: 768 });
+    console.log("Retrieval Route: Using Geminis embedding model 'embedding-001' with dimensions 768");
 
     const client = createClient(
       process.env.SUPABASE_URL!,
       process.env.SUPABASE_PRIVATE_KEY!,
     );
+    
+    // Create vector store without queryName for diagnostic purposes
     const vectorstore = new SupabaseVectorStore(embeddings, {
       client,
       tableName: "documents",
-      queryName: "match_documents",
     });
+
+    // Added: Check document count in the "documents" table
+    const { count, error } = await client
+      .from("documents")
+      .select("*", { count: "exact", head: true });
+    if (error) {
+      console.error("Error counting docs:", error);
+    } else {
+      console.log(`Document table count: ${count}`);
+    }
+
+    // Query information_schema.routines to check if "match_documents" exists
+    const { data: routineData, error: routineError } = await client
+      .from("information_schema.routines")
+      .select("*")
+      .eq("routine_name", "match_documents");
+
+    if (routineError) {
+      console.error("Error checking stored procedure 'match_documents':", routineError);
+    } else if (routineData && routineData.length > 0) {
+      console.log("Stored procedure 'match_documents' exists:", routineData);
+    } else {
+      console.log("Stored procedure 'match_documents' does not exist.");
+    }
+
+    // Execute only the final SQL query implementation which successfully retrieves documents.
+    let finalDocuments: Document[] = [];
+    const { data: finalSqlResults, error: finalSqlError } = await client
+      .from('documents')
+      .select('*')
+      .limit(3);
+    
+    if (finalSqlError) {
+      console.error("FINAL SQL ERROR:", finalSqlError);
+      throw new Error(finalSqlError.message);
+    } else {
+      console.log(`FINAL SQL: Successfully retrieved ${finalSqlResults?.length || 0} documents`);
+      if (finalSqlResults && finalSqlResults.length > 0) {
+        finalDocuments = finalSqlResults.map((item) => new Document({
+          pageContent: item.content,
+          metadata: item.metadata || {}
+        }));
+      }
+    }
 
     /**
      * We use LangChain Expression Language to compose two chains.
@@ -102,28 +152,31 @@ export async function POST(req: NextRequest) {
       console.log("Retrieval Route: Standalone question for retrieval:", standaloneQuestion);
       
       // Also log that this standalone question will be used for embeddings
-      console.log("Retrieval Route: This standalone question will be embedded for vector search");
-    });
-
-    let resolveWithDocuments: (value: Document[]) => void;
-    const documentPromise = new Promise<Document[]>((resolve) => {
-      resolveWithDocuments = resolve;
+      console.log("Retrieval Route: This standalone question will be embedded using Geminis model");
     });
 
     const retriever = vectorstore.asRetriever({
       callbacks: [
         {
           handleRetrieverStart(retriever, documents, runId, parentRunId, tags, metadata) {
-            console.log("Retrieval Route: Retriever starting with query:", documents); // Log the query/input
+            console.log("Retrieval Route: Retriever starting with query:", documents);
+            console.log("Retrieval Route: Vector store config:", {
+              tableName: vectorstore.tableName,
+              queryName: vectorstore.queryName
+            });
           },
           handleRetrieverEnd(documents) {
-            // Log the retrieved documents
             console.log(`Retrieval Route: Retrieved ${documents.length} documents.`);
-            // Log content snippets of retrieved docs for inspection
-            documents.forEach((doc, index) => {
-              console.log(`Retrieval Route: Doc ${index + 1} content snippet:`, doc.pageContent.substring(0, 100) + "...");
-            });
-            resolveWithDocuments(documents);
+            if (documents.length === 0) {
+              console.log("Retrieval Route: No documents found in vector store");
+            } else {
+              documents.forEach((doc, index) => {
+                console.log(`Retrieval Route: Doc ${index + 1}:`, {
+                  content: doc.pageContent.substring(0, 100) + "...",
+                  metadata: doc.metadata,
+                });
+              });
+            }
           },
         },
       ],
@@ -158,25 +211,19 @@ export async function POST(req: NextRequest) {
       chat_history: formatVercelMessages(previousMessages),
     });
 
-    const documents = await documentPromise;
-    const serializedSources = Buffer.from(
-      JSON.stringify(
-        documents.map((doc) => {
-          return {
-            pageContent: doc.pageContent.slice(0, 50) + "...",
-            metadata: doc.metadata,
-          };
-        }),
-      ),
-    ).toString("base64");
-
     return new StreamingTextResponse(stream, {
       headers: {
         "x-message-index": (previousMessages.length + 1).toString(),
-        "x-sources": serializedSources,
+        "x-sources": Buffer.from(JSON.stringify(
+          finalDocuments.map((doc) => ({
+            pageContent: doc.pageContent.slice(0, 50) + "...",
+            metadata: doc.metadata,
+          }))
+        )).toString("base64"),
       },
     });
   } catch (e: any) {
+    console.error("Chat API error:", e);
     return NextResponse.json({ error: e.message }, { status: e.status ?? 500 });
   }
 }

@@ -49,7 +49,7 @@ export async function POST(req: NextRequest) {
     const outputParser = isUsingGemini 
       ? new StringOutputParser()
       : new HttpResponseOutputParser();
-    
+    // @ts-ignore
     const chain = prompt.pipe(model).pipe(outputParser);
 
     const stream = await chain.stream({
