@@ -48,7 +48,6 @@ const ANSWER_TEMPLATE = `Answer the question based only on the following context
 
 Question: {question}
 
-If the context doesn't directly mention "GymNavigator", you can still provide information about gym management systems based on what's available in the context. 
 Make sure your answer is helpful and indicates it's based on the information provided.
 `;
 const answerPrompt = PromptTemplate.fromTemplate(ANSWER_TEMPLATE);
@@ -129,67 +128,29 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    /**
-     * We use LangChain Expression Language to compose two chains.
-     * To learn more, see the guide here:
-     *
-     * https://js.langchain.com/docs/guides/expression_language/cookbook
-     *
-     * You can also use the "createRetrievalChain" method with a
-     * "historyAwareRetriever" to get something prebaked.
-     */
+    // Use the finalDocuments to create a static context.
+    const finalContext = combineDocumentsFn(finalDocuments);
+
+    // Log the standalone question using the existing standalone chain.
     const standaloneQuestionChain = RunnableSequence.from([
       condenseQuestionPrompt,
       model,
       new StringOutputParser(),
     ]);
 
-    // Log the standalone question
     standaloneQuestionChain.invoke({
       chat_history: formatVercelMessages(previousMessages),
       question: currentMessageContent,
     }).then(standaloneQuestion => {
       console.log("Retrieval Route: Standalone question for retrieval:", standaloneQuestion);
-      
-      // Also log that this standalone question will be used for embeddings
       console.log("Retrieval Route: This standalone question will be embedded using Geminis model");
     });
 
-    const retriever = vectorstore.asRetriever({
-      callbacks: [
-        {
-          handleRetrieverStart(retriever, documents, runId, parentRunId, tags, metadata) {
-            console.log("Retrieval Route: Retriever starting with query:", documents);
-            console.log("Retrieval Route: Vector store config:", {
-              tableName: vectorstore.tableName,
-              queryName: vectorstore.queryName
-            });
-          },
-          handleRetrieverEnd(documents) {
-            console.log(`Retrieval Route: Retrieved ${documents.length} documents.`);
-            if (documents.length === 0) {
-              console.log("Retrieval Route: No documents found in vector store");
-            } else {
-              documents.forEach((doc, index) => {
-                console.log(`Retrieval Route: Doc ${index + 1}:`, {
-                  content: doc.pageContent.substring(0, 100) + "...",
-                  metadata: doc.metadata,
-                });
-              });
-            }
-          },
-        },
-      ],
-    });
-
-    const retrievalChain = retriever.pipe(combineDocumentsFn);
-
+    // Build the answer chain with static context from finalDocuments.
     const answerChain = RunnableSequence.from([
       {
-        context: RunnableSequence.from([
-          (input) => input.question,
-          retrievalChain,
-        ]),
+        // Always use the finalContext combined from the finalDocuments.
+        context: () => finalContext,
         chat_history: (input) => input.chat_history,
         question: (input) => input.question,
       },
@@ -197,6 +158,7 @@ export async function POST(req: NextRequest) {
       model,
     ]);
 
+    // Build the full conversational retrieval chain using the standalone chain output.
     const conversationalRetrievalQAChain = RunnableSequence.from([
       {
         question: standaloneQuestionChain,
